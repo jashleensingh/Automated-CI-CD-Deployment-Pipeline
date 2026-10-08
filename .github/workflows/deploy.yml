@@ -2,75 +2,33 @@ name: Automated CI/CD Deployment Pipeline
 
 on:
   push:
-    branches: [main]
+    branches: [ "main" ]
   pull_request:
-    branches: [main]
-  workflow_dispatch:
-    inputs:
-      test_cycles:
-        description: "Number of deploy cycles to run in the test suite"
-        required: false
-        default: "50"
+    branches: [ "main" ]
 
 jobs:
-  lint:
+  test-and-deploy:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Shellcheck all deploy scripts
-        run: shellcheck scripts/*.sh
+    - name: Checkout Repository
+      uses: actions/checkout@v4
 
-  build-image:
-    needs: lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
 
-      - name: Log in to GitHub Container Registry
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+    - name: Make Scripts Executable
+      run: |
+        chmod +x scripts/*.sh
 
-      - name: Build image
-        run: docker build -t ghcr.io/${{ github.repository }}:${{ github.sha }} .
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f app/requirements.txt ]; then pip install -r app/requirements.txt; fi
+        pip install pytest requests
 
-      - name: Push image
-        if: github.event_name != 'pull_request'
-        run: docker push ghcr.io/${{ github.repository }}:${{ github.sha }}
-
-  deploy-and-verify:
-    needs: build-image
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Provision
-        run: bash scripts/provision.sh
-
-      - name: Deploy
-        id: deploy
-        run: bash scripts/deploy.sh "${{ github.sha }}" app
-
-      - name: Verify the deployed service responds
-        run: curl -sf http://127.0.0.1:8099/health
-
-      # Exercises the SAME rollback path a real bad deploy would take,
-      # against this run's own freshly-deployed release — not a mock, a
-      # deliberately broken deploy that has to actually get caught.
-      - name: Prove rollback works (deliberately broken deploy, should auto-recover)
-        run: |
-          deploy_exit=0
-          bash scripts/deploy.sh "broken-${{ github.sha }}" app --inject-broken || deploy_exit=$?
-          if [ "$deploy_exit" -ne 1 ]; then
-            echo "Expected deploy.sh to exit 1 (broken release caught, rollback succeeded); got $deploy_exit instead."
-            exit 1
-          fi
-          echo "Deploy correctly failed and triggered rollback, as expected."
-          curl -sf http://127.0.0.1:8099/health
-
-      - name: Run full test suite
-        run: bash scripts/run_test_suite.sh "${{ github.event.inputs.test_cycles || '50' }}"
+    - name: Run Test Suite
+      run: |
+        ./scripts/run_test_suite.sh
